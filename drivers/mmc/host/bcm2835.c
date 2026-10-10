@@ -157,6 +157,7 @@ struct bcm2835_host {
 	unsigned int		max_clk;	/* Max possible freq */
 	struct work_struct	dma_work;
 	struct delayed_work	timeout_work;	/* Timer for timeouts */
+	unsigned long		timeout_expires; /* Latest command deadline */
 	struct sg_mapping_iter	sg_miter;	/* SG state for PIO */
 	unsigned int		blocks;		/* remaining PIO blocks */
 	int			irq;		/* Device IRQ */
@@ -669,7 +670,8 @@ bool bcm2835_send_command(struct bcm2835_host *host, struct mmc_command *cmd)
 		timeout = DIV_ROUND_UP(cmd->busy_timeout, 1000) * HZ + HZ;
 	else
 		timeout = 10 * HZ;
-	schedule_delayed_work(&host->timeout_work, timeout);
+	host->timeout_expires = jiffies + timeout;
+	mod_delayed_work(system_wq, &host->timeout_work, timeout);
 
 	host->cmd = cmd;
 
@@ -860,6 +862,21 @@ static void bcm2835_timeout(struct work_struct *work)
 	mutex_lock(&host->mutex);
 
 	if (host->mrq) {
+		unsigned long expires = host->timeout_expires;
+		unsigned long now = jiffies;
+
+		/*
+		 * Completion only cancels timeout_work asynchronously because this
+		 * function may be the caller. If an old invocation was already
+		 * running when a later command rearmed the timeout, honour the new
+		 * deadline instead of timing out the later command.
+		 */
+		if (time_before(now, expires)) {
+			mod_delayed_work(system_wq, &host->timeout_work,
+					 expires - now);
+			goto out;
+		}
+
 		dev_err(dev, "timeout waiting for hardware interrupt.\n");
 		bcm2835_dumpregs(host);
 
@@ -878,6 +895,7 @@ static void bcm2835_timeout(struct work_struct *work)
 		}
 	}
 
+out:
 	mutex_unlock(&host->mutex);
 }
 
