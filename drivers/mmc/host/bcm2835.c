@@ -866,8 +866,21 @@ static void bcm2835_timeout(struct work_struct *work)
 		bcm2835_reset(mmc_from_priv(host));
 
 		if (host->data) {
+			struct mmc_command *cmd = host->cmd;
+
 			host->data->error = -ETIMEDOUT;
+			if (cmd)
+				cmd->error = -ETIMEDOUT;
 			bcm2835_finish_data(host);
+
+			/*
+			 * finish_data() waits for an active command to complete,
+			 * but the reset above has stopped that command. Complete
+			 * the request here instead of waiting for an interrupt that
+			 * can no longer arrive.
+			 */
+			if (cmd)
+				bcm2835_finish_request(host);
 		} else {
 			if (host->cmd)
 				host->cmd->error = -ETIMEDOUT;
